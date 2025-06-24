@@ -1,14 +1,17 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import os
 from dotenv import load_dotenv
 import uvicorn
-from datetime import datetime
+import logging
+import asyncio
 
-# Import your existing modules
-from search_guidelines_pgvector import search_guidelines, analyze_with_llm
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -19,13 +22,20 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "https://nextjs-frontend-4mr7.vercel.app/",
+        "https://*.vercel.app",
         os.getenv("FRONTEND_URL", "http://localhost:3000")
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Import app_state but don't initialize heavy resources yet
+from app_state import app_state
+
+# Don't import search_guidelines_pgvector at module level
+search_guidelines = None
+analyze_with_llm = None
 
 class QueryRequest(BaseModel):
     query: str
@@ -39,26 +49,79 @@ class QueryRequest(BaseModel):
     prioritize_distilled: Optional[bool] = False
     top_k: Optional[int] = 5
 
-class Reference(BaseModel):
-    chunk_number: int
-    section: str
-    source_file: str
-    embedded_content: str
-    original_context: str
-    similarity_score: Optional[float] = None
-    clinical_context: Optional[Dict[str, Any]] = None
-
 class QueryResponse(BaseModel):
     answer: str
-    references: List[Reference]
+    references: List[Dict[str, Any]]
     success: bool = True
     error: Optional[str] = None
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize resources after server starts"""
+    logger.info("FastAPI server started, initializing resources in background...")
+    
+    # Initialize in background to not block startup
+    asyncio.create_task(initialize_resources())
+
+async def initialize_resources():
+    """Initialize heavy resources in background"""
+    global search_guidelines, analyze_with_llm
+    
+    try:
+        # Small delay to ensure server is fully up
+        await asyncio.sleep(2)
+        
+        logger.info("Starting resource initialization...")
+        
+        # Initialize app state
+        if app_state.initialize():
+            # Now import the functions
+            from search_guidelines_pgvector import search_guidelines as sg, analyze_with_llm as awl
+            search_guidelines = sg
+            analyze_with_llm = awl
+            logger.info("All resources loaded successfully")
+        else:
+            logger.error("Failed to initialize app state")
+            
+    except Exception as e:
+        logger.error(f"Error initializing resources: {e}")
+
+@app.get("/health")
+async def health_check():
+    """Simple health check that doesn't require resources"""
+    return JSONResponse(
+        status_code=200,
+        content={"status": "healthy", "service": "Clinical Guidelines RAG API"}
+    )
+
+@app.get("/ready")
+async def readiness_check():
+    """Check if the app is ready to handle requests"""
+    if search_guidelines is None or analyze_with_llm is None:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not ready", "message": "Resources still initializing"}
+        )
+    return JSONResponse(
+        status_code=200,
+        content={"status": "ready"}
+    )
 
 @app.post("/api/query", response_model=QueryResponse)
 async def query_endpoint(request: QueryRequest):
     """Main endpoint for RAG queries."""
+    
+    # Check if resources are loaded
+    if search_guidelines is None or analyze_with_llm is None:
+        return QueryResponse(
+            answer="",
+            references=[],
+            success=False,
+            error="Service is still initializing. Please try again in a few seconds."
+        )
+    
     try:
-        # Call your existing search function
+        # Your existing query logic
         results = search_guidelines(
             query=request.query,
             top_k=request.top_k,
@@ -72,22 +135,20 @@ async def query_endpoint(request: QueryRequest):
             prioritize_distilled=request.prioritize_distilled
         )
         
-        # Generate answer using your existing LLM function
         answer = analyze_with_llm(request.query, results)
         
         # Format references
         references = []
         for result in results:
-            ref = Reference(
-                chunk_number=result.get("chunk_number", 0),
-                section=result.get("section", ""),
-                source_file=result.get("source_file", ""),
-                embedded_content=result.get("embedded_content", ""),
-                original_context=result.get("original_context", ""),
-                similarity_score=result.get("similarity_score"),
-                clinical_context=result.get("clinical_context", {})
-            )
-            references.append(ref)
+            references.append({
+                "chunk_number": result.get("chunk_number", 0),
+                "section": result.get("section", ""),
+                "source_file": result.get("source_file", ""),
+                "embedded_content": result.get("embedded_content", ""),
+                "original_context": result.get("original_context", ""),
+                "similarity_score": result.get("similarity_score"),
+                "clinical_context": result.get("clinical_context", {})
+            })
         
         return QueryResponse(
             answer=answer,
@@ -96,8 +157,7 @@ async def query_endpoint(request: QueryRequest):
         )
         
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error processing query: {e}")
         return QueryResponse(
             answer="",
             references=[],
@@ -105,33 +165,20 @@ async def query_endpoint(request: QueryRequest):
             error=str(e)
         )
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint that returns immediately."""
-    return {"status": "healthy", "service": "Clinical Guidelines RAG API", "timestamp": str(datetime.now())}
-
-# Also add a readiness check
-@app.get("/ready")
-async def readiness_check():
-    """Readiness check endpoint."""
-    try:
-        # Quick check without heavy operations
-        return {"status": "ready", "timestamp": str(datetime.now())}
-    except Exception as e:
-        return {"status": "not ready", "error": str(e)}, 503
-
 @app.get("/")
 async def root():
-    """Root endpoint with API information."""
+    """Root endpoint"""
     return {
         "service": "Clinical Guidelines RAG API",
         "version": "1.0.0",
         "endpoints": {
             "query": "/api/query",
-            "health": "/health"
+            "health": "/health",
+            "ready": "/ready"
         }
     }
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
+    logger.info(f"Starting server on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
