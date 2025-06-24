@@ -18,8 +18,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "https://*.vercel.app",  # Allow all Vercel deployments
-        "https://your-specific-app.vercel.app",
+        "https://nextjs-frontend-4mr7.vercel.app/",
         os.getenv("FRONTEND_URL", "http://localhost:3000")
     ],
     allow_credentials=True,
