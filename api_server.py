@@ -5,6 +5,7 @@ from typing import Optional, List, Dict, Any
 import os
 from dotenv import load_dotenv
 import uvicorn
+from datetime import datetime
 
 # Import your existing modules
 from search_guidelines_pgvector import search_guidelines, analyze_with_llm
@@ -106,8 +107,18 @@ async def query_endpoint(request: QueryRequest):
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
-    return {"status": "healthy", "service": "Clinical Guidelines RAG API"}
+    """Health check endpoint that returns immediately."""
+    return {"status": "healthy", "service": "Clinical Guidelines RAG API", "timestamp": str(datetime.now())}
+
+# Also add a readiness check
+@app.get("/ready")
+async def readiness_check():
+    """Readiness check endpoint."""
+    try:
+        # Quick check without heavy operations
+        return {"status": "ready", "timestamp": str(datetime.now())}
+    except Exception as e:
+        return {"status": "not ready", "error": str(e)}, 503
 
 @app.get("/")
 async def root():
