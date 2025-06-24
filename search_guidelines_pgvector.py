@@ -570,7 +570,7 @@ def display_clinical_results(results: List[Dict[str, Any]], show_original: bool 
                 original += "..."
             print(original)
         
-        print(f"\nFILE: {result['source_file'].split('\\')[-1].split('/')[-1]}")
+        print(f"\nFILE: {os.path.basename(result['source_file'])}")
         
         if i < len(results):
             print("-" * 60)
